@@ -3,92 +3,107 @@ import rispy
 import networkx as nx
 import pandas as pd
 import plotly.graph_objects as go
+import matplotlib.pyplot as plt
 from collections import Counter
 from itertools import combinations
 
-# --- Page Setup ---
-st.set_page_config(page_title="CorTexT Pro: AI Governance Mapper", layout="wide")
-st.title("🛡️ CorTexT Pro: Socio-Semantic Research Analytics")
+# --- CONFIGURATION & NORMALIZATION ---
+st.set_page_config(page_title="CorTexT Pro - AI Governance", layout="wide")
 
-# --- Domain Mapping from Research ---
-# These are the 5 domains identified in Lim et al. (2023)
-DOMAINS = {
-    "Domain 1": "AI System Design & Check",
-    "Domain 2": "Assessment Construction & Rollout",
-    "Domain 3": "Data Stewardship & Surveillance",
-    "Domain 4": "Administrative Governance",
-    "Domain 5": "AI-Facilitated Evaluation"
+# Automatic Term Normalization Dictionary 
+# Consolidated based on Lim et al. (2023) triadic ontological framework
+NORMALIZATION_MAP = {
+    "artificial intelligence": "AI",
+    "generative ai": "GenAI",
+    "chatgpt": "GenAI",
+    "academic integrity": "Ethics/Integrity",
+    "plagiarism": "Ethics/Integrity",
+    "assessment scale": "AI Assessment Scale (AIAS)",
+    "higher education": "Higher Ed",
+    "institutional policy": "Governance/Policy",
+    "accountability": "Accountability",
+    "transparency": "Transparency/Explainability",
+    "fairness": "Fairness/Equity"
 }
 
-# --- Sidebar Filters ---
-st.sidebar.header("Analysis Parameters")
-analysis_mode = st.sidebar.selectbox("Analysis Type", ["Socio-Semantic Network", "Temporal Evolution (Sankey)"])
-min_weight = st.sidebar.slider("Minimum Link Strength", 1, 10, 2)
+def normalize(term):
+    term = str(term).lower().strip()
+    for key, val in NORMALIZATION_MAP.items():
+        if key in term: return val
+    return term.title()
 
-# --- Core Logic ---
-def parse_ris_data(uploaded_files):
-    all_data = []
-    for f in uploaded_files:
-        content = f.getvalue().decode("utf-8")
-        all_data.extend(rispy.loads(content))
-    return all_data
+# --- APP INTERFACE ---
+st.title("🛡️ CorTexT Pro: Governance in AI Education")
+st.markdown("### Socio-Semantic Network & Research Agenda Mapper")
 
-uploaded_files = st.file_uploader("Upload RIS Exports (Scopus/WoS/ERIC)", type="ris", accept_multiple_files=True)
+# Sidebar for CorTexT-style filtering
+st.sidebar.header("Network Controls")
+min_freq = st.sidebar.slider("Min Term Frequency", 1, 100, 15)
+min_link = st.sidebar.slider("Min Link Strength", 1, 50, 5)
+layout_engine = st.sidebar.selectbox("Layout Engine", ["Kamada-Kawai (Thematic)", "Spring (Social)"])
 
-if uploaded_files:
-    data = parse_ris_data(uploaded_files)
-    df = pd.DataFrame(data)
+files = st.file_uploader("Upload Scopus/WoS/ERIC RIS Files", type="ris", accept_multiple_files=True)
+
+if files:
+    all_docs = []
+    for f in files:
+        all_docs.extend(rispy.loads(f.getvalue().decode("utf-8")))
     
-    # 1. SOCIO-SEMANTIC NETWORK
-    if analysis_mode == "Socio-Semantic Network":
-        G = nx.Graph()
-        for _, row in df.iterrows():
-            authors = row.get('authors', [])
-            keywords = row.get('keywords', []) or row.get('notes', [])
-            
-            # Link Authors to Keywords (Heterogeneous Link)
-            for a in authors:
-                for k in keywords:
-                    if G.has_edge(a, k):
-                        G[a][k]['weight'] += 1
-                    else:
-                        G.add_edge(a, k, weight=1)
+    # 1. DATA EXTRACTION
+    term_counts = Counter()
+    doc_terms = []
+    
+    for doc in all_docs:
+        # Extract and Normalize Keywords
+        raw_kws = doc.get('keywords', []) or doc.get('notes', [])
+        clean_kws = list(set([normalize(k) for k in raw_kws if len(k) > 2]))
         
-        # Pruning weak links
-        G = nx.Graph([(u, v, d) for u, v, d in G.edges(data=True) if d['weight'] >= min_weight])
-        
-        st.subheader("Socio-Semantic Dynamics")
-        # You would typically use Pyvis or NetworkX here for visualization
-        st.write(f"Generated a network with {G.number_of_nodes()} entities and {G.number_of_edges()} links.")
-        st.info("This map shows how social actors (Authors) drive specific thematic agendas (Keywords).")
+        if clean_kws:
+            doc_terms.append(clean_kws)
+            term_counts.update(clean_kws)
 
-    # 2. TEMPORAL EVOLUTION (SANKEY)
-    elif analysis_mode == "Temporal Evolution (Sankey)":
-        st.subheader("Research Trajectory: 2016 - 2026")
+    # 2. NETWORK CONSTRUCTION
+    G = nx.Graph()
+    # Apply Frequency Filter (Node Level)
+    valid_nodes = {n for n, c in term_counts.items() if c >= min_freq}
+    
+    for kws in doc_terms:
+        filtered = [k for k in kws if k in valid_nodes]
+        if len(filtered) > 1:
+            for pair in combinations(sorted(filtered), 2):
+                w = G.get_edge_data(*pair, {"weight": 0})["weight"]
+                G.add_edge(pair[0], pair[1], weight=w + 1)
+
+    # Apply Weight Filter (Edge Level)
+    G = nx.Graph([(u, v, d) for u, v, d in G.edges(data=True) if d['weight'] >= min_link])
+    G.remove_nodes_from(list(nx.isolates(G)))
+
+    # 3. VISUALIZATION & METRICS
+    col1, col2 = st.columns([3, 1])
+
+    with col1:
+        st.subheader("Socio-Semantic Thematic Map")
+        fig, ax = plt.subplots(figsize=(12, 9))
         
-        # Simulating CorTexT's "Tubes" - tracking terms across time periods
-        df['year'] = pd.to_numeric(df.get('year', 0), errors='coerce').fillna(0).astype(int)
-        df = df[df['year'] >= 2016]
+        pos = nx.kamada_kawai_layout(G) if layout_engine == "Kamada-Kawai (Thematic)" else nx.spring_layout(G)
         
-        # Define Time Windows
-        period_1 = df[df['year'] <= 2020]
-        period_2 = df[df['year'] > 2020]
+        # Scaling
+        node_sizes = [term_counts[n] * 15 for n in G.nodes]
+        edge_widths = [d['weight'] * 0.4 for u, v, d in G.edges(data=True)]
         
-        # Logic to find shared keywords between periods
-        kw1 = Counter([k for kws in period_1['keywords'].dropna() for k in kws]).most_common(10)
-        kw2 = Counter([k for kws in period_2['keywords'].dropna() for k in kws]).most_common(10)
+        nx.draw(G, pos, with_labels=True, node_size=node_sizes, width=edge_widths,
+                node_color="#87CEEB", edge_color="#D3D3D3", font_size=10, alpha=0.8)
+        st.pyplot(fig)
+
+    with col2:
+        st.subheader("Thematic Influence")
+        centrality = nx.degree_centrality(G)
+        df_metrics = pd.DataFrame(centrality.items(), columns=["Theme", "Centrality"])
+        df_metrics = df_metrics.sort_values("Centrality", ascending=False)
+        st.dataframe(df_metrics)
         
-        # Sankey construction
-        fig = go.Figure(data=[go.Sankey(
-            node = dict(label = [k[0] for k in kw1] + [k[0] for k in kw2]),
-            link = dict(
-                source = [i for i in range(len(kw1))],
-                target = [i + len(kw1) for i in range(len(kw2))],
-                value = [10] * len(kw1) # Simplified flow
-            ))])
-        
-        st.plotly_chart(fig, use_container_width=True)
-        st.caption("Flow represents the migration and merging of research themes over time.")
+        # Export for Research Agenda
+        st.download_button("Download Analysis", df_metrics.to_csv(), "ai_governance_themes.csv")
 
 else:
-    st.warning("Please upload your 1,839 search results in RIS format to begin.")
+    st.info("Upload your search results to map the AI Education Governance landscape.")
