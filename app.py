@@ -1,83 +1,116 @@
 import streamlit as st
 import rispy
 import networkx as nx
+import pandas as pd
 import matplotlib.pyplot as plt
 from itertools import combinations
 from collections import Counter
 
-# --- App Configuration ---
-st.set_page_config(page_title="CorTexT Lite - RIS Analyzer", layout="wide")
-st.title("🔬 CorTexT Lite: RIS Network Analyzer")
-st.markdown("Upload your RIS file to visualize the socio-semantic network of Authors and Keywords.")
+# --- Advanced Configuration ---
+st.set_page_config(page_title="AI Governance Mapper Pro", layout="wide")
+st.title("🛡️ AI Education Governance: Network Mapper")
+st.markdown("""
+    This tool performs **Socio-Semantic Analysis** on your RIS exports from Scopus, WoS, and ERIC.
+    It maps the relationship between **Authors (Social)** and **Research Keywords (Semantic)**.
+""")
+
+def clean_term(term):
+    """Normalize terms to prevent 'AI' and 'Artificial Intelligence' from being separate nodes."""
+    term = str(term).lower().strip()
+    mapping = {
+        "artificial intelligence": "AI",
+        "generative ai": "GenAI",
+        "higher education": "HigherEd",
+        "academic integrity": "Ethics/Integrity",
+        "governance": "Governance/Policy"
+    }
+    return mapping.get(term, term)
+
+# --- Sidebar ---
+st.sidebar.header("Filter & Analysis Settings")
+node_type = st.sidebar.selectbox("Network Type", ["Co-Authorship", "Keyword Co-occurrence", "Socio-Semantic (Author-Keyword)"])
+min_occurrence = st.sidebar.slider("Minimum Node Frequency", 1, 50, 5)
+edge_weight = st.sidebar.slider("Minimum Link Strength", 1, 20, 2)
 
 # --- File Upload ---
-uploaded_file = st.file_uploader("Choose an RIS file", type="ris")
+files = st.file_uploader("Upload RIS files", type="ris", accept_multiple_files=True)
 
-if uploaded_file is not None:
-    # 1. Parse RIS File
-    content = uploaded_file.getvalue().decode("utf-8")
-    entries = rispy.loads(content)
+if files:
+    all_entries = []
+    for f in files:
+        content = f.getvalue().decode("utf-8")
+        all_entries.extend(rispy.loads(content))
     
-    st.success(f"Successfully loaded {len(entries)} records!")
+    st.sidebar.success(f"Total Records: {len(all_entries)}")
 
-    # 2. Extract Data for Analysis
-    author_keyword_map = []
-    all_authors = []
-    
-    for entry in entries:
-        authors = entry.get('authors', [])
-        # Keywords are often under 'keywords' or 'notes' depending on the source
-        keywords = entry.get('keywords', []) or entry.get('notes', [])
-        
-        if authors and keywords:
-            # We treat each paper as a 'club' where authors and keywords meet
-            author_keyword_map.append({'authors': authors, 'keywords': keywords})
-            all_authors.extend(authors)
-
-    # 3. Sidebar Controls
-    st.sidebar.header("Network Settings")
-    min_weight = st.sidebar.slider("Minimum Connection Strength", 1, 10, 1)
-    
-    # 4. Build Co-authorship Network
-    # We'll link authors if they share keywords (Socio-semantic approach)
+    # Data Processing
     G = nx.Graph()
+    term_counts = Counter()
     
-    pair_list = []
-    for paper in author_keyword_map:
-        # Create pairs of authors who collaborated
-        if len(paper['authors']) > 1:
-            pair_list.extend(list(combinations(paper['authors'], 2)))
+    for entry in all_entries:
+        authors = [a.strip() for a in entry.get('authors', [])]
+        # Consolidate keywords from various RIS tags
+        kws = entry.get('keywords', []) or entry.get('notes', [])
+        kws = [clean_term(k) for k in kws if len(k) > 2]
+        
+        if node_type == "Co-Authorship":
+            targets = authors
+        elif node_type == "Keyword Co-occurrence":
+            targets = kws
+        else: # Socio-Semantic
+            # Connect authors to the keywords they write about
+            for a in authors:
+                for k in kws:
+                    G.add_edge(a, k, weight=G.get_edge_data(a, k, {"weight": 0})["weight"] + 1)
+            continue
 
-    counts = Counter(pair_list)
+        if len(targets) > 1:
+            for combo in combinations(set(targets), 2):
+                w = G.get_edge_data(combo[0], combo[1], {"weight": 0})["weight"]
+                G.add_edge(combo[0], combo[1], weight=w + 1)
+        
+        for t in targets:
+            term_counts[t] += 1
+
+    # Pruning the Network
+    # Remove nodes that don't meet the frequency threshold
+    nodes_to_remove = [n for n, count in term_counts.items() if count < min_occurrence]
+    G.remove_nodes_from(nodes_to_remove)
     
-    for (a1, a2), weight in counts.items():
-        if weight >= min_weight:
-            G.add_edge(a1, a2, weight=weight)
+    # Remove edges that are too weak
+    edges_to_remove = [(u, v) for u, v, d in G.edges(data=True) if d['weight'] < edge_weight]
+    G.remove_edges_from(edges_to_remove)
+    G.remove_nodes_from(list(nx.isolates(G)))
 
-    # 5. Visualization
-    st.subheader("Author Collaboration Network")
+    # Metrics
     if len(G.nodes) > 0:
-        fig, ax = plt.subplots(figsize=(10, 8))
-        pos = nx.spring_layout(G, k=0.5)
+        col1, col2 = st.columns([3, 1])
         
-        # Node size based on degree (how many connections they have)
-        d = dict(G.degree)
-        nx.draw(G, pos, 
-                with_labels=True, 
-                node_color='orange', 
-                node_size=[v * 100 for v in d.values()],
-                edge_color='#BBBBBB',
-                width=[G[u][v]['weight'] for u, v in G.edges()],
-                font_size=8,
-                ax=ax)
-        
-        st.pyplot(fig)
+        with col1:
+            st.subheader(f"Network Map: {node_type}")
+            fig, ax = plt.subplots(figsize=(12, 10))
+            pos = nx.spring_layout(G, k=0.3, iterations=50)
+            
+            # Node size based on Centrality (Importance)
+            centrality = nx.degree_centrality(G)
+            
+            nx.draw(G, pos, 
+                    with_labels=True, 
+                    node_color="#1f77b4", 
+                    node_size=[v * 5000 for v in centrality.values()],
+                    width=[d['weight'] for u, v, d in G.edges(data=True)],
+                    edge_color="#dddddd",
+                    font_size=9,
+                    alpha=0.8)
+            st.pyplot(fig)
+
+        with col2:
+            st.subheader("Top Influencers")
+            sorted_centrality = sorted(centrality.items(), key=lambda x: x[1], reverse=True)
+            df_cent = pd.DataFrame(sorted_centrality, columns=["Node", "Centrality Score"])
+            st.dataframe(df_cent.head(20))
+            
+            csv = df_cent.to_csv(index=False)
+            st.download_button("Export Metrics to CSV", csv, "network_metrics.csv", "text/csv")
     else:
-        st.warning("Not enough connections found. Try lowering the 'Minimum Connection Strength'.")
-
-    # 6. Data Preview
-    with st.expander("View Raw Data"):
-        st.write(entries[:5]) # Show first 5 records
-
-else:
-    st.info("Please upload an RIS file exported from Scopus, Web of Science, or Zotero.")
+        st.warning("The filters are too strict. No network could be generated.")
